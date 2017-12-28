@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <malloc.h>
 #include <signal.h>
 #include <stdio.h>
@@ -7,6 +8,7 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <time.h>
+#include <unistd.h>
 
 #define ARG0_OFF	100
 #define ARG1_OFF	101
@@ -16,6 +18,14 @@
 #define handle_error(msg) \
     do { perror(msg); exit(EXIT_FAILURE); } while (0)
 
+#ifdef DEBUG
+#define pr_debug(fmt, ...) printf(fmt, ##__VA_ARGS__)
+#else
+#define pr_debug(fmt, ...)
+#endif
+
+typedef volatile char* shbuf;
+
 /* App IDs are used as indexes into the buffer,
  * and they control the permissions.
  */
@@ -24,13 +34,16 @@ static int app_other_id;
 
 static void segv_handler(int sig_no, siginfo_t* info, void *context)
 {
-	char *buffer = (char*)((unsigned long)info->si_addr & ~(PAGE_SIZE - 1));
+	shbuf buffer = (shbuf)((unsigned long)info->si_addr & ~(PAGE_SIZE - 1));
 
-	if (mprotect(buffer, PAGE_SIZE, PROT_READ | PROT_WRITE) == -1)
+	if (mprotect(buffer, PAGE_SIZE, PROT_READ | PROT_WRITE) < 0)
 		handle_error("mprotect");
 
 	/* tell the other side we want to use the buffer */
 	buffer[app_id] = 1;
+
+	/* this acts as a barrier? */
+	msync(buffer, PAGE_SIZE, MS_SYNC);
 
 	/* now, check if the buffer was already in-use */
 	if (buffer[app_other_id]) {
@@ -47,22 +60,12 @@ static void segv_handler(int sig_no, siginfo_t* info, void *context)
 	}
 }
 
-static inline void dump_mem(char *buffer)
-{
-	if (mprotect(buffer, PAGE_SIZE, PROT_READ) == -1)
-		handle_error("mprotect");
-	for (int i = 0; i < 10; i++)
-		printf("%d = [0x%x]\n", i, buffer[100 + i]);
-	if (mprotect(buffer, PAGE_SIZE, PROT_NONE) == -1)
-		handle_error("mprotect");
-}
-
 /*
  * Memory should always satisfy the rule:
  *
  * buffer[RESULT_OFF] == buffer[ARG0] + buffer[ARG1_OFF]
  */
-static void touch_mem(char *buffer)
+static void touch_mem(shbuf buffer)
 {
 	assert(buffer[RESULT_OFF] == buffer[ARG0_OFF] + buffer[ARG1_OFF]);
 
@@ -70,32 +73,37 @@ static void touch_mem(char *buffer)
 	buffer[ARG1_OFF] = rand() % 0x1f;
 	buffer[RESULT_OFF] = buffer[ARG0_OFF] + buffer[ARG1_OFF];
 
-	printf("%d = %d + %d\n", buffer[RESULT_OFF], buffer[ARG0_OFF], buffer[ARG1_OFF]);
+	pr_debug("%d = %d + %d\n", buffer[RESULT_OFF], buffer[ARG0_OFF], buffer[ARG1_OFF]);
 
 	/* release the buffer */
 	buffer[app_id] = 0;
 
-	if (mprotect(buffer, PAGE_SIZE, PROT_NONE) == -1)
+	if (mprotect(buffer, PAGE_SIZE, PROT_NONE) < 0)
 		handle_error("mprotect");
 }
 
-static char *init_mem(void)
+static shbuf init_mem(void)
 {
-	char *buffer;
+	int shmdes;
+	shbuf buffer;
 
-	buffer = memalign(PAGE_SIZE, PAGE_SIZE);
-	if (buffer == NULL)
-		handle_error("memalign");
+	shmdes = shm_open("mprot_test", O_RDWR | O_CREAT, 0666);
+	if (shmdes < 0)
+		handle_error("shm_open");
+	if (ftruncate(shmdes, PAGE_SIZE) < 0)
+		handle_error("ftruncate");
+	buffer = mmap(NULL, PAGE_SIZE, PROT_WRITE, MAP_SHARED, shmdes, 0);
 	memset(buffer, 0, PAGE_SIZE);
-	if (mprotect(buffer, PAGE_SIZE, PROT_NONE) == -1)
+	if (mprotect(buffer, PAGE_SIZE, PROT_NONE) < 0)
 		handle_error("mprotect");
+	close(shmdes);
 	return buffer;
 }
 
 int main(int argc, char *argv[])
 {
 	struct sigaction sa;
-	char *buffer;
+	shbuf buffer;
 
 	if (argc < 3) {
 		printf("Please, give me local and remote IDs\n");
