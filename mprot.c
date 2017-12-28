@@ -24,7 +24,7 @@
 #define pr_debug(fmt, ...)
 #endif
 
-typedef volatile char* shbuf;
+typedef char* shbuf;
 
 /* App IDs are used as indexes into the buffer,
  * and they control the permissions.
@@ -42,8 +42,10 @@ static void segv_handler(int sig_no, siginfo_t* info, void *context)
 	/* tell the other side we want to use the buffer */
 	buffer[app_id] = 1;
 
-	/* this acts as a barrier? */
-	msync(buffer, PAGE_SIZE, MS_SYNC);
+	/* This is a shared-memory-barrier.
+	 * Without it, we can't guarantee proper
+	 * ownership handshake. */
+	msync(buffer, 16, MS_SYNC);
 
 	/* now, check if the buffer was already in-use */
 	if (buffer[app_other_id]) {
@@ -55,7 +57,8 @@ static void segv_handler(int sig_no, siginfo_t* info, void *context)
 		 * the process until the buffer is "released",
 		 * via the app_other_id index.
 		 */
-		mprotect(buffer, PAGE_SIZE, PROT_NONE);
+		if (mprotect(buffer, PAGE_SIZE, PROT_NONE) < 0)
+			handle_error("mprotect");
 		return;
 	}
 }
@@ -65,9 +68,10 @@ static void segv_handler(int sig_no, siginfo_t* info, void *context)
  *
  * buffer[RESULT_OFF] == buffer[ARG0] + buffer[ARG1_OFF]
  */
-static void touch_mem(shbuf buffer)
+static void touch_mem(shbuf buffer, int do_check)
 {
-	assert(buffer[RESULT_OFF] == buffer[ARG0_OFF] + buffer[ARG1_OFF]);
+	if (do_check)
+		assert(buffer[RESULT_OFF] == buffer[ARG0_OFF] + buffer[ARG1_OFF]);
 
 	buffer[ARG0_OFF] = rand() % 0x1f;
 	buffer[ARG1_OFF] = rand() % 0x1f;
@@ -82,6 +86,7 @@ static void touch_mem(shbuf buffer)
 		handle_error("mprotect");
 }
 
+/* This init_mem is *not* race-safe. */
 static shbuf init_mem(void)
 {
 	int shmdes;
@@ -92,10 +97,7 @@ static shbuf init_mem(void)
 		handle_error("shm_open");
 	if (ftruncate(shmdes, PAGE_SIZE) < 0)
 		handle_error("ftruncate");
-	buffer = mmap(NULL, PAGE_SIZE, PROT_WRITE, MAP_SHARED, shmdes, 0);
-	memset(buffer, 0, PAGE_SIZE);
-	if (mprotect(buffer, PAGE_SIZE, PROT_NONE) < 0)
-		handle_error("mprotect");
+	buffer = mmap(NULL, PAGE_SIZE, PROT_NONE, MAP_SHARED, shmdes, 0);
 	close(shmdes);
 	return buffer;
 }
@@ -104,6 +106,7 @@ int main(int argc, char *argv[])
 {
 	struct sigaction sa;
 	shbuf buffer;
+	int do_check;
 
 	if (argc < 3) {
 		printf("Please, give me local and remote IDs\n");
@@ -111,6 +114,11 @@ int main(int argc, char *argv[])
 	} else {
 		app_id = atoi(argv[1]);
 		app_other_id = atoi(argv[2]);
+	}
+
+	if (app_id > 15 || app_other_id > 15) {
+		printf("Sorry, IDs are too large\n");
+		exit(EXIT_SUCCESS);
 	}
 
 	printf("Local ID %d. Remote ID %d\n", app_id, app_other_id);
@@ -126,8 +134,10 @@ int main(int argc, char *argv[])
 
 	printf("Memory initialized, got %p\n", buffer);
 
+	do_check = 0;
 	while (1) {
-		touch_mem(buffer);
+		touch_mem(buffer, do_check);
+		do_check = 1;
 	}
 
 	exit(EXIT_SUCCESS);
