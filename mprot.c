@@ -39,21 +39,20 @@ static void segv_handler(int sig_no, siginfo_t* info, void *context)
 	if (mprotect(buffer, PAGE_SIZE, PROT_READ | PROT_WRITE) < 0)
 		handle_error("mprotect");
 
-	/* tell the other side we want to use the buffer */
+	/* First, we need to tell the remote side we want to use the buffer. */
 	buffer[app_id] = 1;
 
-	/* This is a shared-memory-barrier.
-	 * Without it, we can't guarantee proper
-	 * ownership handshake. */
+	/* This is a shared-memory-barrier. Without it, we can't guarantee
+	 * proper ownership handshake. */
 	msync(buffer, 16, MS_SYNC);
 
-	/* now, check if the buffer was already in-use */
+	/* Now, we check if the buffer was already in-use. */
 	if (buffer[app_other_id]) {
 
-		/* release the buffer */
+		/* Can't use the buffer, release it. */
 		buffer[app_id] = 0;
 
-		/* exiting here will make the buffer access spin
+		/* Exiting here will make the buffer access spin
 		 * the process until the buffer is "released",
 		 * via the app_other_id index.
 		 */
@@ -79,7 +78,7 @@ static void touch_mem(shbuf buffer, int do_check)
 
 	pr_debug("%d = %d + %d\n", buffer[RESULT_OFF], buffer[ARG0_OFF], buffer[ARG1_OFF]);
 
-	/* release the buffer */
+	/* Done, release the buffer. */
 	buffer[app_id] = 0;
 
 	if (mprotect(buffer, PAGE_SIZE, PROT_NONE) < 0)
