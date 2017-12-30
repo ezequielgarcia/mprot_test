@@ -31,6 +31,8 @@ typedef char* shbuf;
  */
 static int app_id;
 static int app_other_id;
+static unsigned long long loops;
+static unsigned long long retries;
 
 static void segv_handler(int sig_no, siginfo_t* info, void *context)
 {
@@ -44,7 +46,10 @@ static void segv_handler(int sig_no, siginfo_t* info, void *context)
 
 	/* This is a shared-memory-barrier. Without it, we can't guarantee
 	 * proper ownership handshake. */
-	msync(buffer, 16, MS_SYNC);
+	if (msync(buffer, 16, MS_SYNC) < 0)
+		handle_error("msync write");
+	if (msync(buffer, 16, MS_INVALIDATE) < 0)
+		handle_error("msync invalidate");
 
 	/* Now, we check if the buffer was already in-use. */
 	if (buffer[app_other_id]) {
@@ -58,6 +63,7 @@ static void segv_handler(int sig_no, siginfo_t* info, void *context)
 		 */
 		if (mprotect(buffer, PAGE_SIZE, PROT_NONE) < 0)
 			handle_error("mprotect");
+		retries++;
 		return;
 	}
 }
@@ -134,10 +140,13 @@ int main(int argc, char *argv[])
 	printf("Memory initialized, got %p\n", buffer);
 
 	do_check = 0;
-	while (1) {
+	while (loops < 10000000) {
 		touch_mem(buffer, do_check);
 		do_check = 1;
+		loops++;
 	}
+
+	printf("retries: %llu\n", retries);
 
 	exit(EXIT_SUCCESS);
 }

@@ -1,5 +1,5 @@
 BINDIR=$(DESTDIR)/usr/bin
-CFLAGS = -Wall -Wextra -O99 -Werror -Wno-unused-parameter -Wno-missing-field-initializers -Wno-discarded-qualifiers
+CFLAGS = -g -Wall -Wextra -O99 -Werror -Wno-unused-parameter -Wno-missing-field-initializers -Wno-discarded-qualifiers
 LDFLAGS = -lrt
 
 mprot: mprot.o
