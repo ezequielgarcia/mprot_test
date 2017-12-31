@@ -36,82 +36,85 @@ static unsigned long long retries;
 
 static void segv_handler(int sig_no, siginfo_t* info, void *context)
 {
-	shbuf buffer = (shbuf)((unsigned long)info->si_addr & ~(PAGE_SIZE - 1));
+	shbuf remote = (shbuf)((unsigned long)info->si_addr & ~(PAGE_SIZE - 1));
+	unsigned char sum;
 
-	if (mprotect(buffer, PAGE_SIZE, PROT_READ | PROT_WRITE) < 0)
+	if (mprotect(remote, PAGE_SIZE, PROT_READ | PROT_WRITE) < 0)
 		handle_error("mprotect");
 
 	/* First, we need to tell the remote side we want to use the buffer. */
-	buffer[app_id] = 1;
+	remote[app_id] = 1;
 
 	/* This is a shared-memory-barrier. Without it, we can't guarantee
 	 * proper ownership handshake. */
-	if (msync(buffer, 16, MS_SYNC) < 0)
+	if (msync(remote, 16, MS_SYNC) < 0)
 		handle_error("msync write");
-	if (msync(buffer, 16, MS_INVALIDATE) < 0)
+	if (msync(remote, 16, MS_INVALIDATE) < 0)
 		handle_error("msync invalidate");
 
 	/* Now, we check if the buffer was already in-use. */
-	if (buffer[app_other_id]) {
+	if (remote[app_other_id]) {
 
 		/* Can't use the buffer, release it. */
-		buffer[app_id] = 0;
+		remote[app_id] = 0;
 
 		/* Exiting here will make the buffer access spin
 		 * the process until the buffer is "released",
 		 * via the app_other_id index.
 		 */
-		if (mprotect(buffer, PAGE_SIZE, PROT_NONE) < 0)
+		if (mprotect(remote, PAGE_SIZE, PROT_NONE) < 0)
 			handle_error("mprotect");
 		retries++;
 		return;
 	}
+	sum = remote[ARG0_OFF] + remote[ARG1_OFF];
+	assert(remote[RESULT_OFF] == sum);
 }
 
-/*
- * Memory should always satisfy the rule:
- *
- * buffer[RESULT_OFF] == buffer[ARG0] + buffer[ARG1_OFF]
- */
-static void touch_mem(shbuf buffer, int do_check)
+static void get_mem(shbuf remote, shbuf local)
 {
-	if (do_check)
-		assert(buffer[RESULT_OFF] == buffer[ARG0_OFF] + buffer[ARG1_OFF]);
-
-	buffer[ARG0_OFF] = rand() % 0x1f;
-	buffer[ARG1_OFF] = rand() % 0x1f;
-	buffer[RESULT_OFF] = buffer[ARG0_OFF] + buffer[ARG1_OFF];
-
-	pr_debug("%d = %d + %d\n", buffer[RESULT_OFF], buffer[ARG0_OFF], buffer[ARG1_OFF]);
+	/* Get a local copy */
+	memcpy(local, remote, PAGE_SIZE);
 
 	/* Done, release the buffer. */
-	buffer[app_id] = 0;
+	remote[app_id] = 0;
 
-	if (mprotect(buffer, PAGE_SIZE, PROT_NONE) < 0)
+	if (mprotect(remote, PAGE_SIZE, PROT_NONE) < 0)
 		handle_error("mprotect");
 }
 
-/* This init_mem is *not* race-safe. */
+static void put_mem(shbuf remote, shbuf local)
+{
+	memcpy(remote + 16, local + 16, PAGE_SIZE - 16);
+
+	/* Done, release the buffer. */
+	remote[app_id] = 0;
+
+	if (mprotect(remote, PAGE_SIZE, PROT_NONE) < 0)
+		handle_error("mprotect");
+}
+
 static shbuf init_mem(void)
 {
 	int shmdes;
-	shbuf buffer;
+	shbuf remote;
 
 	shmdes = shm_open("mprot_test", O_RDWR | O_CREAT, 0666);
 	if (shmdes < 0)
 		handle_error("shm_open");
 	if (ftruncate(shmdes, PAGE_SIZE) < 0)
 		handle_error("ftruncate");
-	buffer = mmap(NULL, PAGE_SIZE, PROT_NONE, MAP_SHARED, shmdes, 0);
+	remote = mmap(NULL, PAGE_SIZE, PROT_NONE, MAP_SHARED, shmdes, 0);
+	if (remote == MAP_FAILED)
+		handle_error("mmap");
 	close(shmdes);
-	return buffer;
+	return remote;
 }
 
 int main(int argc, char *argv[])
 {
+	shbuf remote, local;
 	struct sigaction sa;
-	shbuf buffer;
-	int do_check;
 
 	if (argc < 3) {
 		printf("Please, give me local and remote IDs\n");
@@ -135,14 +138,30 @@ int main(int argc, char *argv[])
 		handle_error("sigaction");
 
 	srand(time(NULL));
-	buffer = init_mem();
 
-	printf("Memory initialized, got %p\n", buffer);
+	local = malloc(PAGE_SIZE);
+	if (!local)
+		handle_error("malloc");
+	remote = init_mem();
 
-	do_check = 0;
-	while (loops < 10000000) {
-		touch_mem(buffer, do_check);
-		do_check = 1;
+	printf("Memory initialized, got %p\n", remote);
+
+	while (loops < 100000) {
+		get_mem(remote, local);
+
+		/* Work on our private copy of buffer.
+		 * The memory should always satisfy the rule:
+		 * buffer[RESULT_OFF] == buffer[ARG0] + buffer[ARG1_OFF]
+		 */
+		assert(local[RESULT_OFF] == local[ARG0_OFF] + local[ARG1_OFF]);
+		local[ARG0_OFF] = rand() % 0x1f;
+		local[ARG1_OFF] = rand() % 0x1f;
+		local[RESULT_OFF] = local[ARG0_OFF] + local[ARG1_OFF];
+
+		/* Let's say this takes some more time */
+		usleep(100);
+
+		put_mem(remote, local);
 		loops++;
 	}
 
